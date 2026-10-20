@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         JaLaPlus
 // @namespace    https://github.com/NormalAlkene/jalaplus
-// @version      0.1.0
-// @description  保存 jala.tools JLPT 题目的作答、答案与解析，导出 JSON
-// @include      /^https:\/\/jala\.tools\/[a-z]{2}\/jlpt(?:\/|$)/
+// @version      0.2.0
+// @description  保存 jala.tools JLPT 题目的作答、连续答题用时与解析，导出 JSON
+// @match        https://jala.tools/*/jlpt
+// @match        https://jala.tools/*/jlpt/*
 // @run-at       document-idle
 // @grant        none
 // @noframes
@@ -14,9 +15,12 @@
   if (window.__jalaplusInstalled) return;
   window.__jalaplusInstalled = true;
 
-  const VERSION = '0.1.0';
-  const STORAGE_KEY = 'jalaplus:v1';
+  const VERSION = '0.2.0';
+  const DB_NAME = 'jalaplus';
+  const DB_VERSION = 1;
+  const SESSION_KEY = 'jalaplus:answering-session';
   const HOST_ID = 'jalaplus-root';
+  const CHECK_LABELS = new Set(['对答案', '答え合わせ', 'Check answers', '정답 확인', 'Kiểm tra đáp án']);
 
   const CATEGORY_LABELS = {
     characters: '文字',
@@ -93,6 +97,16 @@
     batchRunning: false,
     batchCancel: false,
     activeConfirm: null,
+    records: [],
+    batches: [],
+    sessions: [],
+    continuous: false,
+    session: null,
+    pageLoadedAt: typeof performance !== 'undefined' ? performance.timeOrigin : Date.now(),
+    navigationKind: 'document',
+    routeInitialized: false,
+    answerCaptureInFlight: false,
+    continuousBusy: false,
   };
 
   let shell = null;
@@ -108,6 +122,10 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function nowEpoch() {
+    return performance.timeOrigin + performance.now();
   }
 
   function h(tag, attrs = {}, ...children) {
@@ -140,6 +158,7 @@
       trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/>',
       refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>',
       record: '<path d="M4 5h16M4 12h16M4 19h10"/>',
+      stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
     };
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ''}</svg>`;
   }
@@ -162,6 +181,14 @@
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  }
+
+  function formatDuration(ms) {
+    const seconds = Math.max(0, Math.round(Number(ms) / 1000));
+    if (seconds < 60) return `${seconds} 秒`;
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds % 60;
+    return `${minutes} 分 ${rest} 秒`;
   }
 
   function textSize(text) {
@@ -548,7 +575,7 @@
     }
   }
 
-  function buildRecord({ route, data, source, batchId, labels, title, answers, checked, siteStats, url, paperMeta }) {
+  function buildRecord({ route, data, kind, batchId, sessionId, labels, title, answers, checked, siteStats, url, timing }) {
     const locale = route.locale;
     const built = buildQuestion(data, route, locale);
     const questionLabels = {
@@ -556,75 +583,155 @@
       chapter: labels?.chapter || CHAPTER_LABELS[route.chapter] || route.chapter,
     };
     const totalGroups = built.question.groups.length;
+    const hasAttempt = kind !== 'paper' && Boolean(answers || checked);
     return {
       id: uuid(),
+      kind,
       capturedAt: new Date().toISOString(),
-      source,
       batchId: batchId || null,
+      sessionId: sessionId || null,
+      paperRef: `${route.level}/${route.exam}`,
+      questionRef: `${route.level}/${route.exam}/${route.category}/${route.chapter}/${route.index}`,
       paper: {
         level: route.level,
         exam: route.exam,
         title: title || readPaperTitle(route) || `JLPT ${String(route.level).toUpperCase()}・${route.exam}`,
         locale,
-        pageCount: paperMeta?.pageCount ?? null,
-        chapterPages: paperMeta?.chapterPages ?? null,
-        groupCount: paperMeta?.groupCount ?? null,
-        chapterGroups: paperMeta?.chapterGroups ?? null,
-        complete: paperMeta?.complete ?? null,
       },
       question: {
         ...built.question,
         url: url || `${location.origin}${location.pathname}`,
         labels: questionLabels,
-      },
-      attempt: {
-        answers: answers || null,
-        answeredGroups: answers ? Object.keys(answers).length : 0,
-        totalGroups,
-        checked: Boolean(checked),
         siteStats: siteStats || null,
       },
+      attempt: hasAttempt
+        ? {
+            answers: answers || null,
+            answeredGroups: answers ? Object.keys(answers).length : 0,
+            totalGroups,
+            checked: Boolean(checked),
+          }
+        : null,
+      timing: timing || null,
       access: built.access,
     };
   }
 
   // ---------- 收藏集存储 ----------
 
-  function loadStore() {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { version: 1, records: [] };
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      throw new Error('收藏集数据损坏，无法读取');
-    }
-    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.records)) {
-      throw new Error('收藏集数据格式不正确');
-    }
-    return parsed;
+  let dbPromise = null;
+  let readyPromise = null;
+
+  function openDatabase() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains('records')) {
+          const records = db.createObjectStore('records', { keyPath: 'id' });
+          records.createIndex('paperRef', 'paperRef');
+          records.createIndex('questionRef', 'questionRef');
+          records.createIndex('batchId', 'batchId');
+          records.createIndex('sessionId', 'sessionId');
+          records.createIndex('capturedAt', 'capturedAt');
+        }
+        if (!db.objectStoreNames.contains('batches')) {
+          db.createObjectStore('batches', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('sessions')) {
+          db.createObjectStore('sessions', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('meta')) {
+          db.createObjectStore('meta', { keyPath: 'key' });
+        }
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        db.onversionchange = () => db.close();
+        resolve(db);
+      };
+      request.onerror = () => reject(request.error || new Error('无法打开 IndexedDB'));
+    });
   }
 
-  function saveStore(store) {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
-    } catch (error) {
-      if (error && error.name === 'QuotaExceededError') {
-        throw new Error('浏览器存储空间不足，请先删除部分记录');
-      }
-      throw error;
+  function database() {
+    if (!dbPromise) dbPromise = openDatabase();
+    return dbPromise;
+  }
+
+  function requestResult(request) {
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('IndexedDB 操作失败'));
+    });
+  }
+
+  async function allFrom(storeName) {
+    const db = await database();
+    const tx = db.transaction(storeName, 'readonly');
+    return requestResult(tx.objectStore(storeName).getAll());
+  }
+
+  async function putIn(storeName, value) {
+    const db = await database();
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).put(value);
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('IndexedDB 写入失败'));
+      tx.onabort = () => reject(tx.error || new Error('IndexedDB 写入已中止'));
+    });
+  }
+
+  async function deleteManyFrom(storeName, keys) {
+    if (!keys.length) return;
+    const db = await database();
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    for (const key of keys) store.delete(key);
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('IndexedDB 删除失败'));
+      tx.onabort = () => reject(tx.error || new Error('IndexedDB 删除已中止'));
+    });
+  }
+
+  function ensureReady() {
+    if (!readyPromise) {
+      readyPromise = (async () => {
+        const [records, batches, sessions] = await Promise.all([
+          allFrom('records'),
+          allFrom('batches'),
+          allFrom('sessions'),
+        ]);
+        state.records = records;
+        state.batches = batches;
+        state.sessions = sessions;
+      })();
     }
+    return readyPromise;
   }
 
-  function storeSize() {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? textSize(raw) : 0;
+  async function addRecord(record) {
+    await ensureReady();
+    await putIn('records', record);
+    state.records.push(record);
   }
 
-  function addRecord(record) {
-    const store = loadStore();
-    store.records.push(record);
-    saveStore(store);
+  async function putBatch(batch) {
+    await ensureReady();
+    await putIn('batches', batch);
+    const index = state.batches.findIndex((item) => item.id === batch.id);
+    if (index >= 0) state.batches[index] = batch;
+    else state.batches.push(batch);
+  }
+
+  async function putSession(session) {
+    await ensureReady();
+    await putIn('sessions', session);
+    const index = state.sessions.findIndex((item) => item.id === session.id);
+    if (index >= 0) state.sessions[index] = session;
+    else state.sessions.push(session);
   }
 
   function sortRecordsForExport(records) {
@@ -641,14 +748,19 @@
     });
   }
 
-  function exportFile(records, kind, description, slug) {
+  async function exportFile(records, kind, description, slug) {
+    await ensureReady();
+    const batchIds = new Set(records.map((record) => record.batchId).filter(Boolean));
+    const sessionIds = new Set(records.map((record) => record.sessionId).filter(Boolean));
     const envelope = {
       format: 'jalaplus.export',
-      version: 1,
+      version: 2,
       generator: `JaLaPlus ${VERSION}`,
       exportedAt: new Date().toISOString(),
       scope: { kind, description },
       records: sortRecordsForExport(records),
+      batches: state.batches.filter((batch) => batchIds.has(batch.id)),
+      sessions: state.sessions.filter((session) => sessionIds.has(session.id)),
     };
     const date = new Date().toISOString().slice(0, 10);
     const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
@@ -680,8 +792,9 @@
       const record = buildRecord({
         route,
         data,
-        source: 'question',
+        kind: 'question',
         batchId: null,
+        sessionId: null,
         labels: readPageLabels(),
         title: readPaperTitle(route),
         answers,
@@ -689,7 +802,7 @@
         siteStats: readSiteStats(route),
         url: `${location.origin}${location.pathname}`,
       });
-      addRecord(record);
+      await addRecord(record);
       toast(
         answers
           ? '已加入收藏集'
@@ -725,15 +838,25 @@
       const key = `${page.route.category}/${page.route.chapter}`;
       chapterPages[key] = (chapterPages[key] || 0) + 1;
     }
-    const paperMeta = {
+    const batch = {
+      id: uuid(),
+      paperRef: `${route.level}/${route.exam}`,
+      startedAt: new Date().toISOString(),
+      endedAt: null,
+      complete: false,
       pageCount: exam.pages.length,
+      groupCount: 0,
       chapterPages,
-      groupCount: null,
-      chapterGroups: null,
-      complete: null,
+      chapterGroups: {},
     };
-    const batchId = uuid();
     state.batchRunning = true;
+    try {
+      await putBatch(batch);
+    } catch (error) {
+      state.batchRunning = false;
+      toast(`无法开始抓取：${error.message}`, 'error');
+      return;
+    }
     state.batchCancel = false;
     state.progress = { title: '抓取整套试卷', total: exam.pages.length, done: 0, ok: 0, failed: 0, cancelled: false };
     state.modalKind = 'progress';
@@ -762,24 +885,30 @@
           const record = buildRecord({
             route: page.route,
             data,
-            source: 'exam',
-            batchId,
+            kind: 'paper',
+            batchId: batch.id,
+            sessionId: null,
             labels: { category: page.categoryLabel, chapter: page.chapterLabel },
             title: exam.title,
             answers: null,
             checked: false,
             siteStats: readSiteStats(page.route),
             url: `${location.origin}${new URL(page.href, location.origin).pathname}`,
-            paperMeta,
           });
-          addRecord(record);
+          try {
+            await addRecord(record);
+          } catch (error) {
+            fatalStop = true;
+            throw error;
+          }
           ok += 1;
+          const groupKey = `${record.question.category}/${record.question.chapter}`;
+          const groupCount = record.question.groups.length;
+          batch.groupCount += groupCount;
+          batch.chapterGroups[groupKey] = (batch.chapterGroups[groupKey] || 0) + groupCount;
         } catch (error) {
           failed += 1;
           lastError = error.message;
-          if (/存储空间不足/.test(error.message)) {
-            fatalStop = true;
-          }
         }
         state.progress.done = index + 1;
         state.progress.ok = ok;
@@ -790,8 +919,10 @@
         await sleep(180);
       }
     } finally {
+      batch.endedAt = new Date().toISOString();
+      batch.complete = !state.batchCancel && !fatalStop && ok === exam.pages.length;
       try {
-        finalizeBatch(batchId, exam.pages.length, state.batchCancel || fatalStop);
+        await putBatch(batch);
       } catch {
         // 元数据写入失败时保留已保存的记录
       }
@@ -812,25 +943,199 @@
     }
   }
 
-  function finalizeBatch(batchId, pageCount, cancelled) {
-    const store = loadStore();
-    const batchRecords = store.records.filter((record) => record.batchId === batchId);
-    if (!batchRecords.length) return;
-    const chapterGroups = {};
-    let groupCount = 0;
-    for (const record of batchRecords) {
-      const key = `${record.question.category}/${record.question.chapter}`;
-      const count = record.question.groups.length;
-      groupCount += count;
-      chapterGroups[key] = (chapterGroups[key] || 0) + count;
+  // ---------- 连续答题 ----------
+
+  function readStoredSession() {
+    try {
+      const raw = sessionStorage.getItem(SESSION_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed.id !== 'string' || !Number.isFinite(Date.parse(parsed.startedAt))) return null;
+      return { id: parsed.id, startedAt: parsed.startedAt, endedAt: null };
+    } catch {
+      return null;
     }
-    const complete = !cancelled && batchRecords.length === pageCount;
-    for (const record of batchRecords) {
-      record.paper.groupCount = groupCount;
-      record.paper.chapterGroups = chapterGroups;
-      record.paper.complete = complete;
+  }
+
+  function storeSession(session) {
+    try {
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify({ id: session.id, startedAt: session.startedAt }));
+    } catch {
+      // 会话状态无法写入时，本次页面仍然可以继续作答
     }
-    saveStore(store);
+  }
+
+  function clearStoredSession() {
+    try {
+      sessionStorage.removeItem(SESSION_KEY);
+    } catch {
+      // 忽略无法访问 sessionStorage 的情况
+    }
+  }
+
+  function updateContinuousButton() {
+    if (!shell) return;
+    const button = shell.fabWrap.querySelector('[data-action="continuous"]');
+    if (!button) return;
+    const label = state.continuous ? '结束连续答题' : '开始连续答题';
+    button.classList.toggle('jp-fab-active', state.continuous);
+    button.replaceChildren(iconNode(state.continuous ? 'stop' : 'record'));
+    button.title = label;
+    button.setAttribute('aria-label', label);
+  }
+
+  async function restoreContinuousSession() {
+    const stored = readStoredSession();
+    if (!stored) {
+      updateContinuousButton();
+      return;
+    }
+    state.session = stored;
+    state.continuous = true;
+    try {
+      await ensureReady();
+      if (!state.sessions.some((session) => session.id === stored.id)) {
+        await putSession(stored);
+      }
+    } catch (error) {
+      toast(`连续答题会话恢复失败：${error.message}`, 'error');
+    }
+    updateContinuousButton();
+  }
+
+  async function toggleContinuous() {
+    if (state.continuousBusy) return;
+    state.continuousBusy = true;
+    try {
+      await toggleContinuousInner();
+    } finally {
+      state.continuousBusy = false;
+    }
+  }
+
+  async function toggleContinuousInner() {
+    if (state.continuous) {
+      const session = state.session;
+      state.continuous = false;
+      state.session = null;
+      clearStoredSession();
+      updateContinuousButton();
+      toast('已结束连续答题', 'info');
+      if (session) {
+        const ended = { ...session, endedAt: new Date().toISOString() };
+        try {
+          await putSession(ended);
+        } catch (error) {
+          toast(`会话状态保存失败：${error.message}`, 'error');
+        }
+      }
+      return;
+    }
+
+    try {
+      await ensureReady();
+      const session = {
+        id: uuid(),
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+      };
+      await putSession(session);
+      state.session = session;
+      state.continuous = true;
+      storeSession(session);
+      updateContinuousButton();
+      toast('已开始连续答题，点击“对答案”时自动记录', 'success');
+    } catch (error) {
+      toast(`无法开始连续答题：${error.message}`, 'error');
+    }
+  }
+
+  function waitForCheck(route, beforeStats, timeoutMs = 1000) {
+    const started = performance.now();
+    return new Promise((resolve) => {
+      const check = () => {
+        const checked = readChecked();
+        const stats = readSiteStats(route);
+        const statsChanged = Boolean(stats) && (!beforeStats || stats.correct !== beforeStats.correct || stats.wrong !== beforeStats.wrong);
+        if (checked || statsChanged || performance.now() - started >= timeoutMs) resolve();
+        else setTimeout(check, 50);
+      };
+      check();
+    });
+  }
+
+  function sameRoute(a, b) {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+
+  async function captureAnswerOnCheck(route, clickedAt) {
+    if (state.answerCaptureInFlight) return;
+    state.answerCaptureInFlight = true;
+    try {
+      const session = state.session;
+      if (!session) return;
+      await ensureReady();
+      const beforeStats = readSiteStats(route);
+      await waitForCheck(route, beforeStats);
+      if (!sameRoute(parseRoute(), route)) return;
+
+      const data = await loadQuestionData(route);
+      const built = buildQuestion(data, route, route.locale);
+      const answers = readAnswers(built.question.groups);
+      if (!answers) return;
+      if (!sameRoute(parseRoute(), route)) return;
+
+      const answeredAt = new Date(clickedAt).toISOString();
+      const sessionStartedAt = Date.parse(session.startedAt);
+      const timing = {
+        sessionId: session.id,
+        pageLoadedAt: new Date(state.pageLoadedAt).toISOString(),
+        answeredAt,
+        pageMs: Math.max(0, Math.round(clickedAt - state.pageLoadedAt)),
+        sessionStartedAt: session.startedAt,
+        sessionMs: Math.max(0, Math.round(clickedAt - sessionStartedAt)),
+        navigation: state.navigationKind,
+      };
+      const record = buildRecord({
+        route,
+        data,
+        kind: 'answer',
+        batchId: null,
+        sessionId: session.id,
+        labels: readPageLabels(),
+        title: readPaperTitle(route),
+        answers,
+        checked: readChecked(),
+        siteStats: readSiteStats(route),
+        url: `${location.origin}${location.pathname}`,
+        timing,
+      });
+      await addRecord(record);
+      toast(`已记录作答 · 页面 ${formatDuration(timing.pageMs)} · 会话 ${formatDuration(timing.sessionMs)}`, 'success');
+    } catch (error) {
+      toast(`记录作答失败：${error.message}`, 'error');
+    } finally {
+      state.answerCaptureInFlight = false;
+    }
+  }
+
+  function handleCheckClick(event) {
+    if (!state.continuous || state.answerCaptureInFlight || !shell) return;
+    if (event.composedPath().includes(shell.host)) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const button = target.closest('button');
+    if (!button) return;
+    if (!CHECK_LABELS.has((button.textContent || '').trim())) return;
+    const route = parseRoute();
+    if (!route || !route.category || !route.index) return;
+    if (state.route && !sameRoute(state.route, route)) {
+      state.route = route;
+      state.pageLoadedAt = nowEpoch();
+      state.navigationKind = 'spa';
+      state.routeInitialized = true;
+    }
+    void captureAnswerOnCheck(route, nowEpoch());
   }
 
   // ---------- 收藏集界面 ----------
@@ -871,14 +1176,17 @@
 
   function attemptSummary(record) {
     const groups = record.question.groups || [];
-    const answers = record.attempt.answers || null;
+    const siteStats = record.question.siteStats;
+    const answers = record.attempt?.answers || null;
     if (!answers || !Object.keys(answers).length) {
       return {
-        label: '未作答',
+        label: record.kind === 'paper' ? '内容快照' : '未作答',
         cls: 'warn',
-        detail: record.attempt.siteStats
-          ? `网站计数：正确 ${record.attempt.siteStats.correct}，错误 ${record.attempt.siteStats.wrong}`
-          : '没有记录选择结果',
+        detail: siteStats
+          ? `网站计数：正确 ${siteStats.correct}，错误 ${siteStats.wrong}`
+          : record.kind === 'paper'
+            ? '整套抓取，不含作答'
+            : '没有记录选择结果',
       };
     }
     let correct = 0;
@@ -903,11 +1211,14 @@
     };
   }
 
-  function recordLine(record) {
+  function recordLine(record, batchCounts) {
     const summary = attemptSummary(record);
-    const batchCount = record.batchId
-      ? loadStore().records.filter((item) => item.batchId === record.batchId).length
-      : 0;
+    const batchCount = record.batchId ? (batchCounts.get(record.batchId) || 0) : 0;
+    const kindLabel = record.kind === 'paper' ? '整套抓取' : record.kind === 'answer' ? '连续作答' : '单题保存';
+    const timingLabel =
+      record.timing && record.timing.pageMs != null && record.timing.sessionMs != null
+        ? `页面 ${formatDuration(record.timing.pageMs)} · 会话 ${formatDuration(record.timing.sessionMs)}`
+        : null;
     return h(
       'div',
       { class: 'jp-record' },
@@ -916,7 +1227,8 @@
         { class: 'jp-record-top' },
         h('span', { class: `jp-badge ${summary.cls}` }, summary.label),
         h('span', {}, formatDate(record.capturedAt)),
-        h('span', { class: 'jp-muted' }, record.source === 'exam' ? '整套抓取' : '单题保存'),
+        h('span', { class: 'jp-muted' }, kindLabel),
+        timingLabel ? h('span', { class: 'jp-muted' }, timingLabel) : null,
         record.access?.explanation === 'locked' ? h('span', { class: 'jp-badge warn' }, '解析未解锁') : null,
         record.access?.transcript === 'locked' ? h('span', { class: 'jp-badge warn' }, '原文未解锁') : null,
       ),
@@ -967,7 +1279,7 @@
     );
   }
 
-  function renderQuestion(record, records, paperLabel) {
+  function renderQuestion(record, records, paperLabel, batchCounts) {
     const key = questionKey(record);
     const groups = record.question.groups || [];
     const summary = attemptSummary(record);
@@ -1001,11 +1313,11 @@
           { class: 'jp-q-sub' },
           state.view === 'type' ? h('span', {}, paperLabel) : null,
           h('span', {}, summary.detail),
-          latest.attempt.siteStats
+          latest.question.siteStats
             ? h(
                 'span',
                 { class: 'jp-muted' },
-                `网站计数 ${latest.attempt.siteStats.correct} 对 / ${latest.attempt.siteStats.wrong} 错`,
+                `网站计数 ${latest.question.siteStats.correct} 对 / ${latest.question.siteStats.wrong} 错`,
               )
             : null,
           h('span', { class: 'jp-muted' }, formatDate(latest.capturedAt)),
@@ -1029,7 +1341,7 @@
             '删除本题',
           ),
         ),
-        expanded ? h('div', {}, records.map((item) => recordLine(item))) : null,
+        expanded ? h('div', {}, records.map((item) => recordLine(item, batchCounts))) : null,
       ),
     );
   }
@@ -1071,23 +1383,8 @@
   }
 
   function renderCollection() {
-    let store;
-    try {
-      store = loadStore();
-    } catch (error) {
-      return h(
-        'div',
-        { class: 'jp-overlay' },
-        h(
-          'div',
-          { class: 'jp-modal', role: 'dialog', 'aria-modal': 'true' },
-          h('div', { class: 'jp-head' }, h('h2', {}, '收藏集'), h('button', { class: 'jp-icon', 'data-action': 'close' }, iconNode('close'))),
-          h('div', { class: 'jp-body' }, h('p', { class: 'jp-error' }, error.message)),
-        ),
-      );
-    }
-
-    const groups = groupQuestions(store.records);
+    const records = state.records;
+    const groups = groupQuestions(records);
     const questionKeys = [...groups.keys()].sort((a, b) => compareQuestionKeys(a, b, groups));
     const paperMap = new Map();
     const typeMap = new Map();
@@ -1127,22 +1424,12 @@
           };
         });
 
-    const currentPaper = currentPaperKey();
-    let expandedKey = null;
-    if (state.view === 'paper') {
-      expandedKey = currentPaper && paperMap.has(currentPaper)
-        ? `paper:${currentPaper}`
-        : paperEntries.length ? `paper:${paperEntries[0][0]}` : null;
-    } else {
-      const routeType = state.route?.category ? `${state.route.category}/${state.route.chapter}` : null;
-      expandedKey = routeType && typeMap.has(routeType)
-        ? `type:${routeType}`
-        : typeEntries.length ? `type:${typeEntries[0][0]}` : null;
-    }
-    if (expandedKey && !state.expandedGroups.size) state.expandedGroups.add(expandedKey);
-
-    const totalRecords = store.records.length;
+    const totalRecords = records.length;
     const selectedCount = state.selected.size;
+    const batchCounts = new Map();
+    for (const record of records) {
+      if (record.batchId) batchCounts.set(record.batchId, (batchCounts.get(record.batchId) || 0) + 1);
+    }
 
     const overlay = h(
       'div',
@@ -1157,7 +1444,7 @@
             'div',
             {},
             h('h2', {}, '收藏集'),
-            h('p', { class: 'jp-muted' }, `${questionKeys.length} 道题 · ${totalRecords} 条记录 · ${formatBytes(storeSize())}`),
+            h('p', { class: 'jp-muted' }, `${questionKeys.length} 道题 · ${totalRecords} 条记录`),
           ),
           h('button', { class: 'jp-icon', 'data-action': 'close', 'aria-label': '关闭' }, iconNode('close')),
         ),
@@ -1228,7 +1515,7 @@
                         entry.keys.map((key) => {
                           const records = groups.get(key);
                           const paper = paperTitle(records[0]);
-                          return renderQuestion(records[0], records, paper);
+                          return renderQuestion(records[0], records, paper, batchCounts);
                         }),
                       )
                     : null,
@@ -1302,12 +1589,7 @@
     const total = storageTotal(state.storageTab);
     const localTotal = storageTotal('local');
     const sessionTotal = storageTotal('session');
-    let recordCount = '读取失败';
-    try {
-      recordCount = String(loadStore().records.length);
-    } catch {
-      // 收藏集损坏时仍允许管理站点存储
-    }
+    const recordCount = String(state.records.length);
     return h(
       'div',
       { class: 'jp-overlay' },
@@ -1362,7 +1644,7 @@
           h(
             'p',
             { class: 'jp-muted' },
-            `JaLaPlus 收藏集：${recordCount} 条记录，${formatBytes(storeSize())}。`,
+            `JaLaPlus 收藏集（IndexedDB）：${recordCount} 条记录。`,
           ),
           entries.length
             ? entries.map((entry) => {
@@ -1435,11 +1717,11 @@
     if (shell) shell.modalRoot.replaceChildren();
   }
 
-  function openCollection() {
+  async function openCollection() {
     try {
-      loadStore();
+      await ensureReady();
     } catch (error) {
-      toast(error.message, 'error');
+      toast(`读取收藏集失败：${error.message}`, 'error');
       return;
     }
     state.modalKind = 'collection';
@@ -1447,11 +1729,10 @@
     state.expandedGroups.clear();
     state.expandedQuestions.clear();
     state.view = 'paper';
-    const store = loadStore();
     const paper = currentPaperKey();
-    if (paper && store.records.some((record) => paperKey(record) === paper)) {
-      state.expandedGroups.add(`paper:${paper}`);
-    }
+    const fallback = [...state.records].sort((a, b) => paperKey(b).localeCompare(paperKey(a)))[0];
+    const key = paper && state.records.some((record) => paperKey(record) === paper) ? paper : fallback ? paperKey(fallback) : null;
+    if (key) state.expandedGroups.add(`paper:${key}`);
     renderModalRoot({ preserveScroll: false });
   }
 
@@ -1525,8 +1806,7 @@
   }
 
   function recordsForGroup(scope, value) {
-    const store = loadStore();
-    return store.records.filter((record) =>
+    return state.records.filter((record) =>
       scope === 'paper' ? paperKey(record) === value : typeKey(record) === value,
     );
   }
@@ -1536,14 +1816,7 @@
   }
 
   function selectedRecords() {
-    const store = loadStore();
-    return store.records.filter((record) => state.selected.has(questionKey(record)));
-  }
-
-  function mutateStore(mutator) {
-    const store = loadStore();
-    mutator(store);
-    saveStore(store);
+    return state.records.filter((record) => state.selected.has(questionKey(record)));
   }
 
   async function deleteRecords(records, message) {
@@ -1551,10 +1824,9 @@
     const confirmed = await askConfirm(`${message}（共 ${records.length} 条记录）`, '删除');
     if (!confirmed) return;
     const ids = new Set(records.map((record) => record.id));
-    mutateStore((store) => {
-      store.records = store.records.filter((record) => !ids.has(record.id));
-    });
-    const remainingKeys = new Set(loadStore().records.map(questionKey));
+    await deleteManyFrom('records', [...ids]);
+    state.records = state.records.filter((record) => !ids.has(record.id));
+    const remainingKeys = new Set(state.records.map(questionKey));
     for (const key of [...state.selected]) {
       if (!remainingKeys.has(key)) state.selected.delete(key);
     }
@@ -1562,12 +1834,12 @@
     renderModalRoot();
   }
 
-  function downloadSelected(kind, description, slug, records) {
+  async function downloadSelected(kind, description, slug, records) {
     if (!records.length) {
       toast('没有可导出的记录', 'info');
       return;
     }
-    exportFile(records, kind, description, slug);
+    await exportFile(records, kind, description, slug);
   }
 
   async function handleCollectionAction(action, element) {
@@ -1580,10 +1852,9 @@
         state.view = action === 'view-paper' ? 'paper' : 'type';
         state.expandedGroups.clear();
         state.expandedQuestions.clear();
-        const store = loadStore();
         if (state.view === 'paper') {
           const paper = currentPaperKey();
-          const fallback = [...store.records].sort((a, b) => paperKey(b).localeCompare(paperKey(a)))[0];
+          const fallback = [...state.records].sort((a, b) => paperKey(b).localeCompare(paperKey(a)))[0];
           const key = paper || (fallback ? paperKey(fallback) : null);
           if (key) state.expandedGroups.add(`paper:${key}`);
         } else if (state.route?.category) {
@@ -1620,8 +1891,7 @@
       }
       case 'select-batch': {
         const batchId = element.dataset.batch;
-        const store = loadStore();
-        const keys = [...new Set(store.records.filter((record) => record.batchId === batchId).map(questionKey))];
+        const keys = [...new Set(state.records.filter((record) => record.batchId === batchId).map(questionKey))];
         const all = keys.length > 0 && keys.every((key) => state.selected.has(key));
         for (const key of keys) {
           if (all) state.selected.delete(key);
@@ -1631,24 +1901,21 @@
         break;
       }
       case 'export-selected':
-        downloadSelected(
+        await downloadSelected(
           'selection',
           `已选 ${state.selected.size} 道题`,
           'selection',
           selectedRecords(),
         );
         break;
-      case 'export-all': {
-        const store = loadStore();
-        downloadSelected('all', '全部收藏', 'all', store.records);
+      case 'export-all':
+        await downloadSelected('all', '全部收藏', 'all', state.records);
         break;
-      }
       case 'export-question': {
         const key = element.dataset.qkey;
-        const store = loadStore();
-        const records = store.records.filter((record) => questionKey(record) === key);
+        const records = state.records.filter((record) => questionKey(record) === key);
         const sample = records[0];
-        downloadSelected(
+        await downloadSelected(
           'selection',
           sample ? `第${sample.question.index}题 · ${sample.question.labels.chapter}` : '单题',
           key.split('/').slice(0, 2).join('-') + '-' + key.split('/').slice(2).join('-'),
@@ -1660,7 +1927,7 @@
         const scope = element.dataset.group.split(':')[0];
         const value = element.dataset.group.slice(scope.length + 1);
         const records = recordsForGroup(scope, value);
-        downloadSelected(
+        await downloadSelected(
           scope === 'paper' ? 'paper' : 'type',
           scope === 'paper' ? `试卷 ${value}` : `题型 ${value}`,
           value.replace(/[^a-z0-9-]+/gi, '-'),
@@ -1670,17 +1937,16 @@
       }
       case 'export-batch': {
         const batchId = element.dataset.batch;
-        const records = loadStore().records.filter((record) => record.batchId === batchId);
-        downloadSelected('batch', `本次抓取的 ${records.length} 条记录`, 'batch', records);
+        const records = state.records.filter((record) => record.batchId === batchId);
+        await downloadSelected('batch', `本次抓取的 ${records.length} 条记录`, 'batch', records);
         break;
       }
       case 'export-record': {
         const id = element.dataset.record;
-        const store = loadStore();
-        const record = store.records.find((item) => item.id === id);
+        const record = state.records.find((item) => item.id === id);
         if (record) {
           const key = `${paperKey(record).replace('/', '-')}-${record.question.category}-${record.question.chapter}-${record.question.index}`;
-          downloadSelected('record', `第${record.question.index}题的一条记录`, key, [record]);
+          await downloadSelected('record', `第${record.question.index}题的一条记录`, key, [record]);
         }
         break;
       }
@@ -1689,7 +1955,7 @@
         break;
       case 'delete-question': {
         const key = element.dataset.qkey;
-        const records = loadStore().records.filter((record) => questionKey(record) === key);
+        const records = state.records.filter((record) => questionKey(record) === key);
         await deleteRecords(records, '删除这道题');
         break;
       }
@@ -1701,13 +1967,13 @@
       }
       case 'delete-batch': {
         const batchId = element.dataset.batch;
-        const records = loadStore().records.filter((record) => record.batchId === batchId);
+        const records = state.records.filter((record) => record.batchId === batchId);
         await deleteRecords(records, '删除这次抓取的记录');
         break;
       }
       case 'delete-record': {
         const id = element.dataset.record;
-        const records = loadStore().records.filter((record) => record.id === id);
+        const records = state.records.filter((record) => record.id === id);
         await deleteRecords(records, '删除这条记录');
         break;
       }
@@ -1822,7 +2088,12 @@
     if (!shell) return;
     const route = parseRoute();
     const changed = JSON.stringify(route) !== JSON.stringify(state.route);
+    if (changed && state.routeInitialized) {
+      state.pageLoadedAt = nowEpoch();
+      state.navigationKind = 'spa';
+    }
     state.route = route;
+    state.routeInitialized = true;
     shell.host.style.display = route ? 'block' : 'none';
     if (!route) {
       if (state.modalKind) closeModal();
@@ -1844,6 +2115,19 @@
     if (!document.body.contains(shell.host)) document.body.append(shell.host);
   }
 
+  async function openStorage() {
+    try {
+      await ensureReady();
+    } catch (error) {
+      toast(`读取存储失败：${error.message}`, 'error');
+      return;
+    }
+    state.modalKind = 'storage';
+    state.storageTab = 'local';
+    state.expandedKeys.clear();
+    renderModalRoot({ preserveScroll: false });
+  }
+
   // ---------- 初始化 ----------
 
   function ensureShell() {
@@ -1863,6 +2147,11 @@
         'button',
         { class: 'jp-fab jp-fab-primary', 'data-action': 'capture', title: '保存当前题目', 'aria-label': '保存当前题目' },
         iconNode('plus'),
+      ),
+      h(
+        'button',
+        { class: 'jp-fab', 'data-action': 'continuous', title: '开始连续答题', 'aria-label': '开始连续答题' },
+        iconNode('record'),
       ),
       h(
         'button',
@@ -1893,19 +2182,12 @@
         if (route && route.category && route.index) void captureQuestion();
         else if (route && route.level && route.exam && !route.category) void capturePaper();
         else toast('请先打开一套试卷或一道题目', 'info');
+      } else if (button.dataset.action === 'continuous') {
+        void toggleContinuous();
       } else if (button.dataset.action === 'collection') {
-        openCollection();
+        void openCollection();
       } else if (button.dataset.action === 'storage') {
-        try {
-          loadStore();
-        } catch (error) {
-          toast(error.message, 'error');
-          return;
-        }
-        state.modalKind = 'storage';
-        state.storageTab = 'local';
-        state.expandedKeys.clear();
-        renderModalRoot({ preserveScroll: false });
+        void openStorage();
       }
     });
 
@@ -1937,9 +2219,7 @@
     });
 
     window.addEventListener('popstate', refreshRoute);
-    window.addEventListener('storage', (event) => {
-      if (event.key === STORAGE_KEY && state.modalKind === 'collection') renderModalRoot();
-    });
+    document.addEventListener('click', handleCheckClick, true);
 
     const observer = new MutationObserver(() => {
       if (!document.body.contains(host)) document.body.append(host);
@@ -1968,6 +2248,8 @@
     .jp-fab:hover { background: #fdf2f6; border-color: #e26a8d; transform: translateY(-1px); }
     .jp-fab-primary { background: #e26a8d; border-color: #e26a8d; color: #fff; }
     .jp-fab-primary:hover { background: #d85b80; border-color: #d85b80; }
+    .jp-fab-active { background: #1e293b; border-color: #1e293b; color: #fff; }
+    .jp-fab-active:hover { background: #0f172a; border-color: #0f172a; }
     .jp-icon-svg { display: inline-flex; width: 24px; height: 24px; }
     .jp-icon-svg svg { width: 100%; height: 100%; }
     .jp-overlay {
@@ -2112,5 +2394,7 @@
 
   ensureShell();
   refreshRoute();
-  setInterval(refreshRoute, 700);
+  void restoreContinuousSession();
+  // 客户端路由没有可监听的 pushState 事件，用 location 轮询同步当前题目和页面计时。
+  setInterval(refreshRoute, 250);
 })();
