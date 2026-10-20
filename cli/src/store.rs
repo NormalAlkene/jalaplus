@@ -39,6 +39,9 @@ pub fn load_inputs(paths: &[PathBuf]) -> Result<Dataset> {
             .with_context(|| format!("读取导出文件失败：{}", path.display()))?;
         let export: ExportFile = serde_json::from_str(&text)
             .with_context(|| format!("解析导出文件失败：{}", path.display()))?;
+        if export.format.as_deref() == Some("jalaplus.storage") {
+            continue;
+        }
         if export.version != Some(2) {
             bail!("导出文件版本不受支持：{}", path.display());
         }

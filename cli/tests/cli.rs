@@ -108,6 +108,17 @@ fn record(
 fn reads_exported_records_without_a_store() {
     let dir = temp_dir();
     let export_path = dir.join("export.json");
+    fs::write(
+        dir.join("storage.json"),
+        serde_json::to_vec(&json!({
+            "format": "jalaplus.storage",
+            "version": 1,
+            "localStorage": {},
+            "sessionStorage": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let export = json!({
         "format": "jalaplus.export",
         "version": 2,
