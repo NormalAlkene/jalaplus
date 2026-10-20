@@ -42,12 +42,16 @@ cp target/release/jalaquery ~/.local/bin/
 
 ### Skill
 
+仓库内的技能位于 `.agents/skills/jalaquery/`，遵循 [Agent Skills](https://agentskills.io) 约定。项目级使用时，支持该约定的 agent 会从项目根目录发现它。
+
+用户级安装：
+
 ```bash
-mkdir -p ~/.omp/agent/skills
-cp -r skills/jalaquery ~/.omp/agent/skills/
+mkdir -p ~/.agents/skills
+cp -r .agents/skills/jalaquery ~/.agents/skills/
 ```
 
-项目级安装可放在 `.omp/skills/jalaquery/`；Claude Code 可放在 `~/.claude/skills/jalaquery/`。
+若使用的 agent 只扫描自己的技能目录，把同一目录复制到其文档指定的位置即可；例如 omp 可复制到 `~/.omp/agent/skills/`。
 
 ## 使用
 
@@ -102,7 +106,11 @@ jalaquery --input a.json --input b.json compare
 
 ### Skill
 
-安装后可在 omp 或其他支持 skill 的 agent 中使用 `/skill:jalaquery`；技能说明位于 `skills/jalaquery/SKILL.md`。
+安装后可在 omp 或其他支持 skill 的 agent 中使用 `/skill:jalaquery`；技能说明位于 `.agents/skills/jalaquery/SKILL.md`。
+
+## Prompts
+
+Code is cheap, I'll show you my talk. 本项目将开发过程中的 prompts 整理出来一并开源，在 [docs/prompts.md](docs/prompts.md)。
 
 ## 授权协议
 

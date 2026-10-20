@@ -11,7 +11,7 @@ cli/                         Rust 命令行工具
   src/report.rs              文本输出
   src/main.rs                命令入口
   tests/cli.rs               集成测试
-skills/jalaquery/SKILL.md    LLM 技能说明
+.agents/skills/jalaquery/SKILL.md  LLM 技能说明
 ```
 
 ## 开发命令

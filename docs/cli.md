@@ -113,14 +113,16 @@ JLPT 官方使用尺度得点，具体算法没有公开。JaLaQuery 按小题�
 
 ## Skill
 
-`skills/jalaquery/SKILL.md` 是给 LLM 使用的命令说明。安装到 omp：
+`.agents/skills/jalaquery/SKILL.md` 是给 LLM 使用的命令说明，遵循 [Agent Skills](https://agentskills.io) 约定。项目级使用时，支持该约定的 agent 会从项目根目录发现它。
+
+用户级安装：
 
 ```bash
-mkdir -p ~/.omp/agent/skills
-cp -r skills/jalaquery ~/.omp/agent/skills/
+mkdir -p ~/.agents/skills
+cp -r .agents/skills/jalaquery ~/.agents/skills/
 ```
 
-项目级安装放在 `.omp/skills/jalaquery/`；Claude Code 放在 `~/.claude/skills/jalaquery/`。
+若使用的 agent 只扫描自己的技能目录，把同一目录复制到其文档指定位置；例如 omp 可复制到 `~/.omp/agent/skills/`。
 
 ## 已知限制
 
