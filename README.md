@@ -17,7 +17,7 @@ JaLaPlus 是一套对 [jala.tools](https://jala.tools) 的增强工具，主要�
 
 界面和命令行提示均为中文，项目产生的数据保存在本机浏览器和本地文件中，本项目不会将您的数据上传至第三方服务器中。
 
-技术细节见 [用户脚本](docs/userscript.md)（网站数据、存储结构、计时、导出格式）、[命令行工具](docs/cli.md)（命令、判分、JSON 输出）和 [开发](docs/development.md)（结构、测试、API 约束）。
+技术细节见 [用户脚本](docs/userscript.md)（网站数据、存储结构、计时、导出格式）、[命令行工具](docs/cli.md)（命令、判分、JSON 输出）和 [开发](docs/development.md)（结构、测试、API 约束）；关键提示词见 [提示词记录](docs/prompts.md)。
 
 ## 安装
 
