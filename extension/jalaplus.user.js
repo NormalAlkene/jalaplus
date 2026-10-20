@@ -935,6 +935,24 @@
               `同批抓取 ${batchCount} 条`,
             )
           : null,
+        record.batchId
+          ? h(
+              'button',
+              { class: 'jp-link', 'data-action': 'export-batch', 'data-batch': record.batchId },
+              '导出本批',
+            )
+          : null,
+        record.batchId
+          ? h(
+              'button',
+              {
+                class: 'jp-link jp-danger',
+                'data-action': 'delete-batch',
+                'data-batch': record.batchId,
+              },
+              '删除本批',
+            )
+          : null,
         h(
           'button',
           { class: 'jp-link', 'data-action': 'export-record', 'data-record': record.id },
@@ -1650,6 +1668,12 @@
         );
         break;
       }
+      case 'export-batch': {
+        const batchId = element.dataset.batch;
+        const records = loadStore().records.filter((record) => record.batchId === batchId);
+        downloadSelected('batch', `本次抓取的 ${records.length} 条记录`, 'batch', records);
+        break;
+      }
       case 'export-record': {
         const id = element.dataset.record;
         const store = loadStore();
@@ -1673,6 +1697,12 @@
         const scope = element.dataset.group.split(':')[0];
         const value = element.dataset.group.slice(scope.length + 1);
         await deleteRecords(recordsForGroup(scope, value), scope === 'paper' ? '删除这套试卷' : '删除这个题型');
+        break;
+      }
+      case 'delete-batch': {
+        const batchId = element.dataset.batch;
+        const records = loadStore().records.filter((record) => record.batchId === batchId);
+        await deleteRecords(records, '删除这次抓取的记录');
         break;
       }
       case 'delete-record': {
