@@ -7,7 +7,7 @@ JaLaPlus 是一套自用的 JLPT 真题作答记录工具，由两部分组成�
 
 界面和命令行提示均为中文。所有数据只保存在本机，不上传到其他服务。
 
-> 当前状态：网站调研、方案设计和本文档已完成；用户脚本与命令行工具待实现。
+> 当前状态：用户脚本与命令行工具已实现。用户脚本在 Chromium 中完成了单题保存、整套抓取、收藏集导出和存储管理的测试；Firefox + Tampermonkey 的实际安装需要手动验证。命令行工具已通过单元测试和端到端导入测试。
 
 ## 调研结论
 
@@ -180,7 +180,16 @@ jlpt:stats:<级别>/<试卷>/<类别>/<章节>/<页码>
     "level": "n2",
     "exam": "2020-12",
     "title": "JLPT N2・2020年12月",
-    "locale": "zh"
+    "locale": "zh",
+    "pageCount": 88,
+    "chapterPages": {
+      "vocabulary/word-formation": 3
+    },
+    "groupCount": 102,
+    "chapterGroups": {
+      "vocabulary/word-formation": 3
+    },
+    "complete": true
   },
   "question": {
     "category": "vocabulary",
@@ -247,7 +256,8 @@ jlpt:stats:<级别>/<试卷>/<类别>/<章节>/<页码>
 - `question.groups` 中的每个小题是一个计分单位。一个页面可能有多个小题。
 - `attempt.answers` 只包含用户实际选择的选项。未作答时为 `null`。
 - `access` 标记解析和原文是否被登录限制遮挡。`locked` 表示网站只返回了占位内容。
-- `siteStats` 是网站自己的计数，不是本次记录的选择结果。
+- `siteStats` 是网站自己的计数，不是本次记录的选择结果。计数按小题累加。
+- `paper.pageCount`、`chapterPages` 记录整套抓取时的页面数量；`paper.groupCount`、`chapterGroups` 记录小题数量；`complete` 表示这次抓取是否覆盖整套试卷。单题保存时这些字段为 `null`。
 
 ## 命令行工具 JaLaQuery
 
@@ -257,10 +267,13 @@ JaLaQuery 读取导出的 JSON，保存到本机数据文件，之后可以反�
 
 ```bash
 cd cli
+cargo test
 cargo build --release
 mkdir -p ~/.local/bin
 cp target/release/jalaquery ~/.local/bin/
 ```
+
+也可以运行 `cargo install --path cli`，安装到 Cargo 的可执行文件目录。
 
 默认数据文件：
 
@@ -287,20 +300,27 @@ jalaquery overview
 # 一套试卷的估算分数、各题型正确率和错题
 jalaquery paper n2/2020-12
 
+# 只要分数，不要 JSON 里的错题详情
+jalaquery paper n2/2020-12 --no-wrong --json
+
 # 错题、用户答案、正确答案和解析
 jalaquery wrong n2/2020-12 --limit 20
+jalaquery wrong n2/2020-12 --type word-formation --json
+jalaquery wrong n2/2020-12 --all --no-explanation
 
 # 某道题的全部记录
 jalaquery show n2/2020-12/vocabulary/word-formation/1
 
-# 按章节统计正确率
+# 按题型、类别或试卷统计正确率
 jalaquery stats --by chapter
+jalaquery stats n2/2020-12 --by category
+jalaquery stats --by paper
 
-# 比较两套试卷
+# 比较两套或多套试卷
 jalaquery compare n2/2020-07 n2/2020-12
 ```
 
-给程序或 Agent 使用时加 `--json`，输出紧凑 JSON；加 `--pretty` 输出带缩进的 JSON。
+给程序或 Agent 使用时加 `--json`，输出紧凑 JSON；加 `--pretty` 输出带缩进的 JSON。JSON 字段使用 camelCase，例如 `expectedGroups`、`answeredGroups`、`totalScore`、`passLine`。
 
 ### 判分方式
 
@@ -319,18 +339,21 @@ JLPT 官方使用尺度得点，具体算法没有公开。JaLaQuery 只能按�
 | N4 | 90 | 38（语言知识与阅读） | - | 19 |
 | N5 | 80 | 38（语言知识与阅读） | - | 19 |
 
-同一道题有多条记录时，判分使用最新一条有作答的记录。未作答的小题按 0 分计算，并在结果中显示覆盖率。覆盖率不足 100% 时，分数标记为估算值。
+同一道题有多条记录时，判分使用最新一条有作答的记录。未作答的小题按 0 分计算，并在结果中显示覆盖率。
+
+`paper.complete` 表示整套试卷是否完整抓取。只有完整抓取时，`passed` 才会给出合格或不合格；抓取不完整时 `passed` 为 `null`，分数只覆盖已记录的小题。
 
 ### 输出示例
 
 ```text
 试卷：JLPT N2・2020年12月
-覆盖：102 / 102 小题（100%）
-估算总分：126 / 180（合格线 90）
-语言知识：42 / 60（基准点 19）
-阅读：46 / 60（基准点 19）
-听力：38 / 60（基准点 19）
-结果：合格（估算）
+覆盖：96 / 102 小题（94.1%），88 / 88 个页面
+估算总分：120 / 180（合格线 90，合格）
+
+得点区分：
+  语言知识：40 / 60（基准点 19；已答 48/51，正确 34，正确率 70.8%）
+  阅读：40 / 60（基准点 19；已答 20/21，正确 14，正确率 70.0%）
+  听力：40 / 60（基准点 19；已答 28/30，正确 20，正确率 71.4%）
 ```
 
 ## Skill
@@ -353,9 +376,10 @@ Claude Code 用户可复制到 `~/.claude/skills/jalaquery/`。
 ## 已知限制
 
 - 网站只在 `localStorage` 保存正确和错误数量，不保存每次选择的选项和时间。完整历史只能由脚本从安装后开始记录。
-- 解析和听力原文需要登录。未登录时保存的记录会标记为 `locked`，不会保存占位文本。
+- 网站的正确、错误计数按小题累加，不能还原出用户选择了哪个选项。脚本保存的 `attempt.answers` 才是本次选择。
+- 解析和听力原文需要登录。未登录时保存的记录会标记为 `locked`，不会保存占位文本。登录后网站返回的真实内容尚未在本开发环境中验证。
 - 网站返回的解析可能是当前语言的一份文本。脚本按当前页面语言取值，缺失时回退到中文、英文。
-- `localStorage` 容量通常约 5 MB。包含阅读文章和听力原文的记录会占用较多空间，收藏集接近上限时会提示删除旧记录。
+- `localStorage` 容量通常约 5 MB。包含阅读文章和听力原文的记录会占用较多空间，收藏集接近上限时会提示删除旧记录。实测一套 N2 试卷的 88 条记录约占用 120 KB。
 - JLPT 官方分数使用尺度得点，命令行只能给出等分估算，不等同于真实考试成绩。
 - 网站页面结构变化可能导致解析失败。脚本会优先读取 Next.js 页面数据，读取失败时给出提示，不会保存空记录。
 - 当前沙箱中 Firefox 无法启动（用户命名空间创建失败），用户脚本的页面测试使用 Chromium 完成。Firefox + Tampermonkey 的实际安装需要手动验证。
@@ -365,13 +389,20 @@ Claude Code 用户可复制到 `~/.claude/skills/jalaquery/`。
 用户脚本是单个 ES2020 文件，无需构建。命令行工具使用 Rust 2021。
 
 ```bash
-# 命令行测试
+# 命令行测试：单元测试 + 端到端导入/查询
 cd cli
 cargo test
 
 # 用户脚本语法检查
 node --check extension/jalaplus.user.js
 ```
+
+本次开发已完成以下验证：
+
+- 在 Chromium 中注入用户脚本，验证单题保存、未作答提示、点击“对答案”后的状态、收藏集按试卷查看、按题型查看、导出所选、存储面板和整套抓取。
+- 整套抓取 N2 2020 年 12 月：88 个页面全部成功，保存 88 条记录、102 个小题；抓取约 1 分钟。
+- 用户脚本导出的真实 JSON 已通过 `jalaquery import` 导入，`overview`、`paper`、`wrong`、`show` 正常输出。
+- Rust 单元测试覆盖得点区分、合格线、数据单位换算；集成测试覆盖导入、判分、错题、题目详情、题型统计和重复导入。
 
 用户脚本的页面测试步骤：
 
@@ -397,7 +428,14 @@ Firefox 手动测试步骤：
 │   └── jalaplus.user.js
 ├── cli/
 │   ├── Cargo.toml
-│   └── src/
+│   ├── src/
+│   │   ├── main.rs
+│   │   ├── model.rs
+│   │   ├── report.rs
+│   │   ├── score.rs
+│   │   └── store.rs
+│   └── tests/
+│       └── cli.rs
 └── skills/
     └── jalaquery/
         └── SKILL.md
