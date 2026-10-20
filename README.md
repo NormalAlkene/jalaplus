@@ -294,7 +294,7 @@ jalaquery --input exports/ paper n2/2020-12
 jalaquery --input n2-2020-07.json --input n2-2020-12.json compare
 ```
 
-每次命令在内存中读取输入、按记录编号去重、按试卷和题型建立索引，输出结果后结束。需要保留历史时，保留导出文件或目录即可。
+每次命令在内存中读取输入、按记录编号去重、按试卷和题型建立索引，输出结果后结束。目录中的 `jalaplus.storage` 存储备份会被跳过，分析使用 `jalaplus.export` 记录导出。需要保留历史时，保留导出文件或目录即可。
 
 ### 常用命令
 
