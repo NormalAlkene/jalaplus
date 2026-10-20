@@ -1044,7 +1044,7 @@
       h(
         'button',
         { class: 'jp-group-toggle', 'data-action': 'toggle-group', 'data-group': groupKey },
-        h('span', { class: `jp-chevron ${expanded ? 'open' : ''}` }, icon('chevron')),
+        h('span', { class: `jp-chevron ${expanded ? 'open' : ''}` }, iconNode('chevron')),
         h('span', { class: 'jp-group-title' }, title),
         h('span', { class: 'jp-muted' }, `${questionKeys.length} 道题 · ${records.length} 条记录`),
       ),
