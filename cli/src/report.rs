@@ -35,7 +35,7 @@ pub fn passed_label(value: Option<bool>) -> &'static str {
 
 pub fn print_overview(summaries: &[PaperSummary]) {
     if summaries.is_empty() {
-        println!("还没有记录，请先运行 jalaquery import <导出文件>。");
+        println!("还没有记录，请通过 --input 提供导出文件。");
         return;
     }
     let headers = [
@@ -121,6 +121,17 @@ pub fn print_paper(summary: &PaperSummary) {
             section.expected,
             section.correct,
             pct(section.accuracy)
+        );
+    }
+    if let Some(stats) = summary.site_stats.as_ref() {
+        println!();
+        println!(
+            "网站计数：{} 个页面，{} 个小题，正确 {}，错误 {}，正确率 {}",
+            stats.questions,
+            stats.groups,
+            stats.correct,
+            stats.wrong,
+            pct(stats.accuracy)
         );
     }
     if !summary.chapters.is_empty() {
@@ -300,23 +311,15 @@ pub fn build_compare_chapters(summaries: &[PaperSummary]) -> Vec<CompareChapter>
     rows
 }
 
-pub fn print_store(path: &str, size: u64, records: usize, papers: usize, questions: usize) {
-    println!("数据文件：{path}");
-    println!("文件大小：{size} 字节");
-    println!("记录：{records} 条");
-    println!("试卷：{papers} 套");
-    println!("题目页面：{questions} 个");
-}
-
 pub fn print_record(record: &Record, show_explanation: bool) {
     println!(
         "记录：{} · {} · {}",
         record.id,
         short_time(&record.captured_at),
-        if record.source == "exam" {
-            "整套抓取"
-        } else {
-            "单题保存"
+        match record.kind {
+            crate::model::Kind::Paper => "整套抓取",
+            crate::model::Kind::Question => "单题保存",
+            crate::model::Kind::Answer => "连续作答",
         }
     );
     if let Some(batch) = &record.batch_id {
@@ -347,7 +350,10 @@ pub fn print_record(record: &Record, show_explanation: bool) {
             println!("{translation}");
         }
     }
-    let answers = record.attempt.answers.as_ref();
+    let answers = record
+        .attempt
+        .as_ref()
+        .and_then(|attempt| attempt.answers.as_ref());
     for (index, group) in record.question.groups.iter().enumerate() {
         println!();
         println!(
@@ -444,14 +450,17 @@ pub fn print_record(record: &Record, show_explanation: bool) {
         println!();
         println!("听力原文：未解锁（需要登录）");
     }
-    if let Some(stats) = record.attempt.site_stats.as_ref() {
+    if let Some(stats) = record.question.site_stats.as_ref() {
         println!();
         println!("网站计数：正确 {}，错误 {}", stats.correct, stats.wrong);
     }
-}
-
-pub fn print_import(added: usize, updated: usize, skipped: usize, files: usize) {
-    println!("导入 {files} 个文件：新增 {added} 条，更新 {updated} 条，跳过 {skipped} 条。");
+    if let Some(timing) = record.timing.as_ref() {
+        println!();
+        println!(
+            "用时：页面 {} ms，会话 {} ms（{}）",
+            timing.page_ms, timing.session_ms, timing.navigation
+        );
+    }
 }
 
 fn format_ms(ms: u64) -> String {

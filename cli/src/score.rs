@@ -1,4 +1,4 @@
-use crate::model::{AnswerValue, Record};
+use crate::model::{AnswerValue, Batch, Record};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -25,6 +25,18 @@ pub struct PaperSummary {
     pub sections: Vec<SectionSummary>,
     pub chapters: Vec<ChapterSummary>,
     pub wrong: Vec<WrongItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_stats: Option<SiteStatsSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteStatsSummary {
+    pub questions: usize,
+    pub groups: usize,
+    pub correct: u32,
+    pub wrong: u32,
+    pub accuracy: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,7 +97,13 @@ struct SectionMeta {
     min: u32,
 }
 
-pub fn summarize(records: &[&Record], include_chapters: bool, include_wrong: bool) -> PaperSummary {
+pub fn summarize(
+    records: &[&Record],
+    batch: Option<&Batch>,
+    include_chapters: bool,
+    include_wrong: bool,
+    include_site_stats: bool,
+) -> PaperSummary {
     let first = records[0];
     let level = first.paper.level.clone();
     let exam = first.paper.exam.clone();
@@ -125,24 +143,16 @@ pub fn summarize(records: &[&Record], include_chapters: bool, include_wrong: boo
         }
     }
 
-    let latest_meta = records
-        .iter()
-        .filter(|record| record.paper.complete.is_some())
-        .max_by(|a, b| compare_newer(a, b))
-        .copied();
-    if let Some(meta) = latest_meta.and_then(|record| record.paper.chapter_groups.as_ref()) {
+    if let Some(meta) = batch.and_then(|batch| batch.chapter_groups.as_ref()) {
         for (chapter, count) in meta {
             let expected = chapter_expected.entry(chapter.clone()).or_insert(0);
             *expected = (*expected).max(*count);
         }
     }
 
-    let page_count = records
-        .iter()
-        .filter_map(|record| record.paper.page_count)
-        .max();
+    let page_count = batch.and_then(|batch| batch.page_count);
     let captured_pages = max_groups.len();
-    let mut complete = latest_meta.and_then(|record| record.paper.complete);
+    let mut complete = batch.and_then(|batch| batch.complete);
     if complete == Some(true) {
         if let Some(page_count) = page_count {
             if captured_pages < page_count {
@@ -184,7 +194,11 @@ pub fn summarize(records: &[&Record], include_chapters: bool, include_wrong: boo
         let Some(record) = record else { continue };
         let chapter = format!("{}/{}", record.question.category, record.question.chapter);
         let section = section_for(&level, &record.question.category);
-        let Some(answers) = record.attempt.answers.as_ref() else {
+        let Some(answers) = record
+            .attempt
+            .as_ref()
+            .and_then(|attempt| attempt.answers.as_ref())
+        else {
             continue;
         };
         for group in &record.question.groups {
@@ -355,6 +369,41 @@ pub fn summarize(records: &[&Record], include_chapters: bool, include_wrong: boo
         }
     }
 
+    let site_stats = if include_site_stats {
+        let mut latest: BTreeMap<String, &Record> = BTreeMap::new();
+        for record in records {
+            if record.question.site_stats.is_none() {
+                continue;
+            }
+            let key = record.question_key();
+            if newer(record, latest.get(&key).copied()) {
+                latest.insert(key, record);
+            }
+        }
+        let mut correct = 0u32;
+        let mut wrong = 0u32;
+        let mut groups = 0usize;
+        for record in latest.values() {
+            let stats = record.question.site_stats.as_ref().unwrap();
+            correct += stats.correct;
+            wrong += stats.wrong;
+            groups += record.group_count();
+        }
+        if latest.is_empty() {
+            None
+        } else {
+            Some(SiteStatsSummary {
+                questions: latest.len(),
+                groups,
+                correct,
+                wrong,
+                accuracy: ratio(correct as usize, (correct + wrong) as usize),
+            })
+        }
+    } else {
+        None
+    };
+
     PaperSummary {
         paper,
         title,
@@ -376,6 +425,7 @@ pub fn summarize(records: &[&Record], include_chapters: bool, include_wrong: boo
         sections,
         chapters,
         wrong,
+        site_stats,
     }
 }
 

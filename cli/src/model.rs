@@ -1,6 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Paper,
+    #[default]
+    Question,
+    Answer,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportFile {
@@ -12,6 +21,10 @@ pub struct ExportFile {
     pub exported_at: Option<String>,
     #[serde(default)]
     pub records: Vec<Record>,
+    #[serde(default)]
+    pub batches: Vec<Batch>,
+    #[serde(default)]
+    pub sessions: Vec<Session>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -20,17 +33,25 @@ pub struct Record {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
+    pub kind: Kind,
+    #[serde(default)]
     pub captured_at: String,
     #[serde(default)]
-    pub source: String,
-    #[serde(default)]
     pub batch_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub paper_ref: String,
+    #[serde(default)]
+    pub question_ref: String,
     #[serde(default)]
     pub paper: Paper,
     #[serde(default)]
     pub question: Question,
     #[serde(default)]
-    pub attempt: Attempt,
+    pub attempt: Option<Attempt>,
+    #[serde(default)]
+    pub timing: Option<Timing>,
     #[serde(default)]
     pub access: Access,
 }
@@ -46,16 +67,6 @@ pub struct Paper {
     pub title: Option<String>,
     #[serde(default)]
     pub locale: Option<String>,
-    #[serde(default)]
-    pub page_count: Option<usize>,
-    #[serde(default)]
-    pub chapter_pages: Option<BTreeMap<String, usize>>,
-    #[serde(default)]
-    pub group_count: Option<usize>,
-    #[serde(default)]
-    pub chapter_groups: Option<BTreeMap<String, usize>>,
-    #[serde(default)]
-    pub complete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -85,6 +96,8 @@ pub struct Question {
     pub transcript: Option<Transcript>,
     #[serde(default)]
     pub explanation: Option<String>,
+    #[serde(default)]
+    pub site_stats: Option<SiteStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -173,8 +186,25 @@ pub struct Attempt {
     pub total_groups: u32,
     #[serde(default)]
     pub checked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Timing {
     #[serde(default)]
-    pub site_stats: Option<SiteStats>,
+    pub session_id: String,
+    #[serde(default)]
+    pub page_loaded_at: String,
+    #[serde(default)]
+    pub answered_at: String,
+    #[serde(default)]
+    pub page_ms: u64,
+    #[serde(default)]
+    pub session_started_at: String,
+    #[serde(default)]
+    pub session_ms: u64,
+    #[serde(default)]
+    pub navigation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -195,6 +225,40 @@ pub struct Access {
     pub transcript: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Batch {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub paper_ref: String,
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+    #[serde(default)]
+    pub complete: Option<bool>,
+    #[serde(default)]
+    pub page_count: Option<usize>,
+    #[serde(default)]
+    pub group_count: Option<usize>,
+    #[serde(default)]
+    pub chapter_pages: Option<BTreeMap<String, usize>>,
+    #[serde(default)]
+    pub chapter_groups: Option<BTreeMap<String, usize>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Session {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnswerValue {
     pub id: String,
@@ -204,18 +268,26 @@ pub struct AnswerValue {
 
 impl Record {
     pub fn paper_key(&self) -> String {
-        format!("{}/{}", self.paper.level, self.paper.exam)
+        if !self.paper_ref.is_empty() {
+            self.paper_ref.clone()
+        } else {
+            format!("{}/{}", self.paper.level, self.paper.exam)
+        }
     }
 
     pub fn question_key(&self) -> String {
-        format!(
-            "{}/{}/{}/{}/{}",
-            self.paper.level,
-            self.paper.exam,
-            self.question.category,
-            self.question.chapter,
-            self.question.index
-        )
+        if !self.question_ref.is_empty() {
+            self.question_ref.clone()
+        } else {
+            format!(
+                "{}/{}/{}/{}/{}",
+                self.paper.level,
+                self.paper.exam,
+                self.question.category,
+                self.question.chapter,
+                self.question.index
+            )
+        }
     }
 
     pub fn group_count(&self) -> usize {
@@ -224,8 +296,8 @@ impl Record {
 
     pub fn has_answers(&self) -> bool {
         self.attempt
-            .answers
             .as_ref()
+            .and_then(|attempt| attempt.answers.as_ref())
             .map(|answers| !answers.is_empty())
             .unwrap_or(false)
     }
@@ -242,6 +314,8 @@ impl Record {
     pub fn normalize(&mut self) {
         self.id = self.id.trim().to_string();
         self.captured_at = self.captured_at.trim().to_string();
+        self.paper_ref = self.paper_ref.trim().to_string();
+        self.question_ref = self.question_ref.trim().to_string();
         self.paper.level = self.paper.level.trim().to_lowercase();
         self.paper.exam = self.paper.exam.trim().to_string();
         self.paper.title = self
@@ -265,11 +339,13 @@ impl Record {
                 option.id = option.id.trim().to_string();
             }
         }
-        if let Some(answers) = &mut self.attempt.answers {
-            *answers = answers
-                .iter()
-                .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
-                .collect();
+        if let Some(attempt) = &mut self.attempt {
+            if let Some(answers) = &mut attempt.answers {
+                *answers = answers
+                    .iter()
+                    .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+                    .collect();
+            }
         }
     }
 

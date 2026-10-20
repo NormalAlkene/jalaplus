@@ -1,203 +1,99 @@
-use crate::model::{ExportFile, Record};
+use crate::model::{Batch, ExportFile, Record, Session};
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Store {
-    #[serde(default = "store_version")]
-    pub version: u32,
-    #[serde(default)]
-    pub records: Vec<Record>,
-}
-
-fn store_version() -> u32 {
-    1
-}
-
-impl Default for Store {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            records: Vec::new(),
-        }
-    }
-}
-
 #[derive(Debug, Default)]
-pub struct ImportStats {
-    pub added: usize,
-    pub updated: usize,
-    pub skipped: usize,
-    pub files: usize,
+pub struct Dataset {
+    pub records: Vec<Record>,
+    pub batches: Vec<Batch>,
+    pub sessions: Vec<Session>,
 }
 
-pub fn resolve_store_path(cli_store: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = cli_store {
-        return Ok(path);
+impl Dataset {
+    pub fn batch_for(&self, paper: &str) -> Option<&Batch> {
+        self.batches
+            .iter()
+            .filter(|batch| batch.paper_ref == paper)
+            .max_by(|a, b| a.started_at.cmp(&b.started_at))
     }
-    if let Some(path) = env::var_os("JALAQUERY_STORE") {
-        return Ok(PathBuf::from(path));
-    }
-    if let Some(path) = env::var_os("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(path).join("jalaquery").join("store.json"));
-    }
-    if let Some(home) = env::var_os("HOME") {
-        return Ok(PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("jalaquery")
-            .join("store.json"));
-    }
-    bail!("无法确定数据文件位置，请设置 HOME、XDG_DATA_HOME 或使用 --store")
 }
 
-pub fn load(path: &Path) -> Result<Store> {
-    if !path.exists() {
-        return Ok(Store::default());
-    }
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("读取数据文件失败：{}", path.display()))?;
-    if text.trim().is_empty() {
-        return Ok(Store::default());
-    }
-    let store: Store = serde_json::from_str(&text)
-        .with_context(|| format!("数据文件格式不正确：{}", path.display()))?;
-    if store.version != 1 {
-        bail!("不支持的数据文件版本：{}", store.version);
-    }
-    Ok(store)
-}
-
-pub fn save(path: &Path, store: &Store) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("创建数据目录失败：{}", parent.display()))?;
-    }
-    let data = serde_json::to_vec(store).context("序列化数据失败")?;
-    let temp = path.with_extension("tmp");
-    fs::write(&temp, data).with_context(|| format!("写入数据文件失败：{}", temp.display()))?;
-    fs::rename(&temp, path).with_context(|| format!("替换数据文件失败：{}", path.display()))?;
-    Ok(())
-}
-
-pub fn import_paths(paths: &[PathBuf], store_path: &Path) -> Result<ImportStats> {
+pub fn load_inputs(paths: &[PathBuf]) -> Result<Dataset> {
     if paths.is_empty() {
-        bail!("请提供至少一个导出文件");
+        bail!("请使用 --input 提供至少一个导出文件或目录");
     }
-    let files = expand_paths(paths)?;
+
+    let files = collect_files(paths)?;
     if files.is_empty() {
-        bail!("没有找到 JSON 文件");
+        bail!("没有找到可读取的 JSON 文件");
     }
-    let mut store = load(store_path)?;
-    let mut records: BTreeMap<String, Record> = store
-        .records
-        .drain(..)
-        .map(|record| (record.id.clone(), record))
-        .collect();
-    let mut stats = ImportStats {
-        files: files.len(),
-        ..ImportStats::default()
-    };
-    for file in &files {
-        let (exported, skipped) = read_export(file)?;
-        stats.skipped += skipped;
-        for record in exported {
-            if records.insert(record.id.clone(), record).is_some() {
-                stats.updated += 1;
-            } else {
-                stats.added += 1;
+
+    let mut records: BTreeMap<String, Record> = BTreeMap::new();
+    let mut batches: BTreeMap<String, Batch> = BTreeMap::new();
+    let mut sessions: BTreeMap<String, Session> = BTreeMap::new();
+
+    for path in files {
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("读取导出文件失败：{}", path.display()))?;
+        let export: ExportFile = serde_json::from_str(&text)
+            .with_context(|| format!("解析导出文件失败：{}", path.display()))?;
+        if export.version != Some(2) {
+            bail!("导出文件版本不受支持：{}", path.display());
+        }
+        for mut record in export.records {
+            record.normalize();
+            if !record.is_valid() {
+                bail!("记录格式不完整：{}", path.display());
+            }
+            records.insert(record.id.clone(), record);
+        }
+        for batch in export.batches {
+            if !batch.id.trim().is_empty() {
+                batches.insert(batch.id.clone(), batch);
+            }
+        }
+        for session in export.sessions {
+            if !session.id.trim().is_empty() {
+                sessions.insert(session.id.clone(), session);
             }
         }
     }
-    let mut merged: Vec<Record> = records.into_values().collect();
-    sort_records(&mut merged);
-    store.records = merged;
-    save(store_path, &store)?;
-    Ok(stats)
+
+    Ok(Dataset {
+        records: records.into_values().collect(),
+        batches: batches.into_values().collect(),
+        sessions: sessions.into_values().collect(),
+    })
 }
 
-fn expand_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
+fn collect_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut files = BTreeSet::new();
     for path in paths {
-        if path.is_dir() {
-            let mut found = Vec::new();
-            for entry in
-                fs::read_dir(path).with_context(|| format!("读取目录失败：{}", path.display()))?
-            {
-                let entry = entry?;
-                let item = entry.path();
-                if item.extension().and_then(|ext| ext.to_str()) == Some("json") {
-                    found.push(item);
-                }
-            }
-            found.sort();
-            files.extend(found);
-        } else if path.is_file() {
-            files.push(path.clone());
-        } else {
-            bail!("文件不存在：{}", path.display());
-        }
+        collect_path(path, &mut files)?;
     }
-    files.sort();
-    files.dedup();
-    Ok(files)
+    Ok(files.into_iter().collect())
 }
 
-fn read_export(path: &Path) -> Result<(Vec<Record>, usize)> {
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("读取导出文件失败：{}", path.display()))?;
-    let value: Value = serde_json::from_str(&text)
-        .with_context(|| format!("导出文件不是合法 JSON：{}", path.display()))?;
-    let records: Vec<Record> = if value.is_array() {
-        serde_json::from_value(value)
-            .with_context(|| format!("导出文件格式不正确：{}", path.display()))?
-    } else {
-        if let Some(format) = value.get("format").and_then(Value::as_str) {
-            if format != "jalaplus.export" {
-                bail!("不支持的导出格式：{}（{}）", format, path.display());
-            }
+fn collect_path(path: &Path, files: &mut BTreeSet<PathBuf>) -> Result<()> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("无法读取路径：{}", path.display()))?;
+    if metadata.is_file() {
+        if path.extension().and_then(|value| value.to_str()) == Some("json") {
+            files.insert(path.to_path_buf());
         }
-        if let Some(version) = value.get("version").and_then(Value::as_u64) {
-            if version != 1 {
-                bail!("不支持的导出版本：{}（{}）", version, path.display());
-            }
-        }
-        let export: ExportFile = serde_json::from_value(value)
-            .with_context(|| format!("导出文件格式不正确：{}", path.display()))?;
-        export.records
-    };
-    let total = records.len();
-    let mut valid = Vec::with_capacity(total);
-    for mut record in records {
-        record.normalize();
-        if record.is_valid() {
-            valid.push(record);
-        }
+        return Ok(());
     }
-    let skipped = total - valid.len();
-    Ok((valid, skipped))
-}
-
-pub fn sort_records(records: &mut [Record]) {
-    records.sort_by(|a, b| {
-        a.paper_key()
-            .cmp(&b.paper_key())
-            .then_with(|| {
-                category_order(&a.question.category).cmp(&category_order(&b.question.category))
-            })
-            .then_with(|| {
-                chapter_order(&a.question.category, &a.question.chapter)
-                    .cmp(&chapter_order(&b.question.category, &b.question.chapter))
-            })
-            .then_with(|| a.question.index.cmp(&b.question.index))
-            .then_with(|| a.captured_at.cmp(&b.captured_at))
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    if !metadata.is_dir() {
+        bail!("不支持的路径：{}", path.display());
+    }
+    for entry in fs::read_dir(path).with_context(|| format!("读取目录失败：{}", path.display()))?
+    {
+        let entry = entry?;
+        collect_path(&entry.path(), files)?;
+    }
+    Ok(())
 }
 
 pub fn chapter_order(category: &str, chapter: &str) -> u8 {
@@ -257,10 +153,6 @@ pub fn normalize_paper(input: &str) -> Result<String> {
         bail!("试卷格式应为 n2/2020-12，例如 n2/2020-12");
     }
     Ok(format!("{level}/{exam}"))
-}
-
-pub fn store_size(path: &Path) -> u64 {
-    fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
 #[cfg(test)]
