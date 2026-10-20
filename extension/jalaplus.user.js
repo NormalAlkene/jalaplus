@@ -56,6 +56,28 @@
     listening: 4,
   };
 
+  const CHAPTER_ORDER = {
+    'kanji-reading': 0,
+    orthography: 1,
+    'word-formation': 2,
+    'contextually-defined': 3,
+    paraphrase: 4,
+    usage: 5,
+    'grammar-form': 6,
+    'sentence-composition': 7,
+    'text-grammar': 8,
+    'short-passage': 9,
+    'medium-passage': 10,
+    'integrated-comparison': 11,
+    'thematic-passage': 12,
+    'information-retrieval': 13,
+    'task-based-comprehension': 14,
+    'key-points': 15,
+    'general-outline': 16,
+    'quick-response': 17,
+    'integrated-comprehension': 18,
+  };
+
   const ROUTE_RE = /^\/([a-z]{2})\/jlpt(?:\/(n[1-5])(?:\/(\d{4}-\d{2})(?:\/([^/]+)\/([^/]+)\/(\d+))?)?)?\/?$/;
 
   const state = {
@@ -611,7 +633,7 @@
       if (paper) return paper;
       const category = (CATEGORY_ORDER[a.question.category] ?? 99) - (CATEGORY_ORDER[b.question.category] ?? 99);
       if (category) return category;
-      const chapter = String(a.question.chapter).localeCompare(String(b.question.chapter));
+      const chapter = (CHAPTER_ORDER[a.question.chapter] ?? 99) - (CHAPTER_ORDER[b.question.chapter] ?? 99);
       if (chapter) return chapter;
       const index = Number(a.question.index) - Number(b.question.index);
       if (index) return index;
@@ -833,7 +855,7 @@
     if (paper) return paper;
     const category = (CATEGORY_ORDER[left.question.category] ?? 99) - (CATEGORY_ORDER[right.question.category] ?? 99);
     if (category) return category;
-    const chapter = String(left.question.chapter).localeCompare(String(right.question.chapter));
+    const chapter = (CHAPTER_ORDER[left.question.chapter] ?? 99) - (CHAPTER_ORDER[right.question.chapter] ?? 99);
     if (chapter) return chapter;
     return Number(left.question.index) - Number(right.question.index);
   }
@@ -1067,7 +1089,7 @@
       const right = groups.get(b[1][0])[0];
       const category = (CATEGORY_ORDER[left.question.category] ?? 99) - (CATEGORY_ORDER[right.question.category] ?? 99);
       if (category) return category;
-      return String(left.question.labels.chapter).localeCompare(String(right.question.labels.chapter));
+      return (CHAPTER_ORDER[left.question.chapter] ?? 99) - (CHAPTER_ORDER[right.question.chapter] ?? 99);
     });
 
     const entries = state.view === 'paper'
@@ -1093,9 +1115,11 @@
       expandedKey = currentPaper && paperMap.has(currentPaper)
         ? `paper:${currentPaper}`
         : paperEntries.length ? `paper:${paperEntries[0][0]}` : null;
-    } else if (state.route?.category) {
-      const key = `${state.route.category}/${state.route.chapter}`;
-      expandedKey = typeMap.has(key) ? `type:${key}` : null;
+    } else {
+      const routeType = state.route?.category ? `${state.route.category}/${state.route.chapter}` : null;
+      expandedKey = routeType && typeMap.has(routeType)
+        ? `type:${routeType}`
+        : typeEntries.length ? `type:${typeEntries[0][0]}` : null;
     }
     if (expandedKey && !state.expandedGroups.size) state.expandedGroups.add(expandedKey);
 
