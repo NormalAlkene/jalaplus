@@ -3,6 +3,7 @@ name = "jalaquery"
 version = "0.2.0"
 edition = "2021"
 description = "查询和判分 JaLaPlus 导出的 JLPT 作答记录"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0"

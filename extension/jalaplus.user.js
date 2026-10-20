@@ -3,6 +3,7 @@
 // @namespace    https://github.com/NormalAlkene/jalaplus
 // @version      0.2.0
 // @description  保存 jala.tools JLPT 题目的作答、连续答题用时与解析，导出 JSON
+// @license      MIT
 // @match        https://jala.tools/*/jlpt
 // @match        https://jala.tools/*/jlpt/*
 // @run-at       document-idle
