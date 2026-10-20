@@ -17,11 +17,7 @@ JaLaPlus 是一套 JLPT 真题作答记录工具，由两部分组成：
 
 界面和命令行提示均为中文，数据保存在本机浏览器和本地文件中。
 
-## 文档
-
-- [用户脚本](docs/userscript.md)：网站数据、存储结构、连续答题计时、导出格式。
-- [命令行工具](docs/cli.md)：安装、输入、命令、判分和 JSON 输出。
-- [开发](docs/development.md)：仓库结构、测试和技术说明。
+技术细节见 [用户脚本](docs/userscript.md)（网站数据、存储结构、计时、导出格式）、[命令行工具](docs/cli.md)（命令、判分、JSON 输出）和 [开发](docs/development.md)（结构、测试、API 约束）。
 
 ## 安装
 
