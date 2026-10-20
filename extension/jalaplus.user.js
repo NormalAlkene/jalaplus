@@ -157,7 +157,8 @@
       download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
       trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/>',
       refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>',
-      pencil: '<path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z"/><path d="m13.5 6.5 4 4"/>',
+      play: '<path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/>',
+      stop: '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/>',
     };
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ''}</svg>`;
   }
@@ -978,7 +979,7 @@
     if (!button) return;
     const label = state.continuous ? '结束连续答题' : '开始连续答题';
     button.classList.toggle('jp-fab-active', state.continuous);
-    button.replaceChildren(iconNode('pencil'));
+    button.replaceChildren(iconNode(state.continuous ? 'stop' : 'play'));
     button.title = label;
     button.setAttribute('aria-label', label);
   }
@@ -2144,13 +2145,13 @@
       { class: 'jp-fab-wrap' },
       h(
         'button',
-        { class: 'jp-fab jp-fab-primary', 'data-action': 'capture', title: '保存当前题目', 'aria-label': '保存当前题目' },
-        iconNode('plus'),
+        { class: 'jp-fab jp-fab-continuous', 'data-action': 'continuous', title: '开始连续答题', 'aria-label': '开始连续答题' },
+        iconNode('play'),
       ),
       h(
         'button',
-        { class: 'jp-fab jp-fab-continuous', 'data-action': 'continuous', title: '开始连续答题', 'aria-label': '开始连续答题' },
-        iconNode('record'),
+        { class: 'jp-fab jp-fab-primary', 'data-action': 'capture', title: '保存当前题目', 'aria-label': '保存当前题目' },
+        iconNode('plus'),
       ),
       h(
         'button',
@@ -2247,10 +2248,10 @@
     .jp-fab:hover { background: #fdf2f6; border-color: #e26a8d; transform: translateY(-1px); }
     .jp-fab-primary { background: #e26a8d; border-color: #e26a8d; color: #fff; }
     .jp-fab-primary:hover { background: #d85b80; border-color: #d85b80; }
-    .jp-fab-continuous { background: #5b7bd5; border-color: #5b7bd5; color: #fff; }
-    .jp-fab-continuous:hover { background: #4d6ac4; border-color: #4d6ac4; }
-    .jp-fab-continuous.jp-fab-active { background: #2f4b9e; border-color: #2f4b9e; }
-    .jp-fab-continuous.jp-fab-active:hover { background: #263d82; border-color: #263d82; }
+    .jp-fab-continuous { background: #2b8a6e; border-color: #2b8a6e; color: #fff; }
+    .jp-fab-continuous:hover { background: #23755d; border-color: #23755d; }
+    .jp-fab-continuous.jp-fab-active { background: #c0392b; border-color: #c0392b; }
+    .jp-fab-continuous.jp-fab-active:hover { background: #a93226; border-color: #a93226; }
     .jp-icon-svg { display: inline-flex; width: 24px; height: 24px; }
     .jp-icon-svg svg { width: 100%; height: 100%; }
     .jp-overlay {
